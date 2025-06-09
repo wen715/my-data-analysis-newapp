@@ -3,20 +3,83 @@ import pandas as pd
 import numpy as np
 import io
 import os
+import requests
+import time
 from pandasai import SmartDatalake
-from pandasai.llm import LiteLLM # 最终修改：使用 LiteLLM 接口
+from pandasai.llm.base import LLM
+
+# 自定义 DeepSeek LLM 类 - 完全绕过 OpenAI
+class DeepSeekLLM(LLM):
+    def __init__(self, api_key: str, model: str = "deepseek-chat", api_base: str = "https://api.deepseek.com/v1"):
+        self.api_key = api_key
+        self.model = model
+        self.api_base = api_base
+        self.max_retries = 3
+        self.retry_delay = 2  # 秒
+
+    def call(self, prompt: str, **kwargs) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 4000
+        }
+        
+        # 添加可选参数
+        if "temperature" in kwargs:
+            payload["temperature"] = kwargs["temperature"]
+        
+        # 重试机制
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    f"{self.api_base}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    return response.json()["choices"][0]["message"]["content"]
+                else:
+                    error_msg = f"API错误 ({response.status_code}): {response.text}"
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
+                    else:
+                        return f"API请求失败: {error_msg}"
+            
+            except requests.exceptions.RequestException as e:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    return f"网络请求异常: {str(e)}"
+        
+        return "未知错误: 所有重试失败"
+
+    @property
+    def type(self) -> str:
+        return "deepseek-llm"
 
 # --- 页面设置 ---
 st.set_page_config(page_title="智能数据分析助理 (DeepSeek版)", layout="wide")
 
 # --- 公用函数 (用于模板更新功能) ---
 def update_template_file(template_df: pd.DataFrame, data_dfs: list, key_column: str) -> pd.DataFrame | str:
-    if key_column not in template_df.columns: return f"错误：关键列 '{key_column}' 不存在于您的模板文件中。"
+    if key_column not in template_df.columns: 
+        return f"错误：关键列 '{key_column}' 不存在于您的模板文件中。"
     for df in data_dfs:
-        if key_column not in df.columns: return f"错误：关键列 '{key_column}' 不存在于其中一个数据源文件中。"
-    if not data_dfs: return template_df
+        if key_column not in df.columns: 
+            return f"错误：关键列 '{key_column}' 不存在于其中一个数据源文件中。"
+    if not data_dfs: 
+        return template_df
     try:
-        source_data = pd.concat(data_dfs, ignore_index=True).drop_duplicates(subset=[key_column], keep='last').set_index(key_column)
+        source_data = pd.concat(data_dfs, ignore_index=True).drop_duplicates(
+            subset=[key_column], keep='last').set_index(key_column)
     except Exception as e:
         return f"设置索引时发生错误: {e}"
     updated_df = template_df.copy()
@@ -37,7 +100,7 @@ st.markdown("本应用已配置为安全模式，可供多用户使用。")
 # --- 从 Streamlit Secrets 安全获取 DeepSeek API 密钥 ---
 try:
     if "DEEPSEEK_API_KEY" in st.secrets and st.secrets["DEEPSEEK_API_KEY"]:
-        st.session_state.api_key = st.secrets["DEEPSEEK_API_KEY"]
+        api_key = st.secrets["DEEPSEEK_API_KEY"]
         st.sidebar.success("DeepSeek API 密钥已成功加载", icon="✅")
     else:
         st.error("DeepSeek API 密钥未在应用的 Secrets 中正确设置。")
@@ -51,6 +114,9 @@ except Exception as e:
     st.error(f"加载 API 密钥时发生未知错误: {e}")
     st.stop()
 
+# --- 初始化自定义 DeepSeek LLM ---
+llm = DeepSeekLLM(api_key=api_key)
+
 # --- 功能分页 ---
 tab1, tab2 = st.tabs(["🧠 智能分析 (自动分表)", "🎯 模板精确更新"])
 
@@ -60,7 +126,8 @@ with tab1:
     st.success("本模式由 DeepSeek 强力驱动，可理解多个不同文件，并根据您的问题智能选择进行分析。")
     
     ai_uploaded_files = st.file_uploader(
-        "请一次性上传所有相关 Excel 文件 (.xlsx)", type=["xlsx"], accept_multiple_files=True, key="ai_uploader"
+        "请一次性上传所有相关 Excel 文件 (.xlsx)", type=["xlsx"], 
+        accept_multiple_files=True, key="ai_uploader"
     )
 
     if ai_uploaded_files:
@@ -104,12 +171,6 @@ with tab1:
                         **用户的请求是**：『{user_prompt}』
                         """
                         
-                        # 最终修改：初始化 LLM，使用专门的 LiteLLM 接口
-                        llm = LiteLLM(
-                            api_key=st.session_state.api_key, 
-                            model="deepseek/deepseek-chat" # 使用 LiteLLM 的标准格式 "提供商/模型名称"
-                        )
-                        
                         lake = SmartDatalake(ai_dataframes, config={"llm": llm})
                         result = lake.chat(expert_system_prompt)
                         
@@ -125,20 +186,39 @@ with tab1:
 with tab2:
     st.header("将多个文件的数据，更新到一个模板文件中")
     st.info("此功能会保持模板文件的行列顺序不变，仅填补其中的空白单元格。")
-    st.subheader("① 上传您的模板文件"); template_file = st.file_uploader("请上传您要更新的目标模板文件 (例如 test.xlsx)", type=["xlsx"], accept_multiple_files=False, key="template_uploader")
-    st.subheader("② 上传您的数据源文件"); data_source_files = st.file_uploader("请上传包含更新信息的一个或多个数据文件", type=["xlsx"], accept_multiple_files=True, key="data_source_uploader")
-    st.subheader("③ 输入关键列名"); key_column = st.text_input("请输入用于匹配模板和数据源的字段名称（例如：项目, ID, 姓名）", help="此字段必须同时存在于模板和所有数据文件中。")
+    st.subheader("① 上传您的模板文件")
+    template_file = st.file_uploader(
+        "请上传您要更新的目标模板文件 (例如 test.xlsx)", 
+        type=["xlsx"], accept_multiple_files=False, key="template_uploader"
+    )
+    st.subheader("② 上传您的数据源文件")
+    data_source_files = st.file_uploader(
+        "请上传包含更新信息的一个或多个数据文件", 
+        type=["xlsx"], accept_multiple_files=True, key="data_source_uploader"
+    )
+    st.subheader("③ 输入关键列名")
+    key_column = st.text_input(
+        "请输入用于匹配模板和数据源的字段名称（例如：项目, ID, 姓名）", 
+        help="此字段必须同时存在于模板和所有数据文件中。"
+    )
     if st.button("⚙️ 开始精确更新", type="primary"):
-        if not template_file: st.warning("请上传模板文件。")
-        elif not data_source_files: st.warning("请上传至少一个数据源文件。")
-        elif not key_column: st.warning("请输入关键列名。")
+        if not template_file: 
+            st.warning("请上传模板文件。")
+        elif not data_source_files: 
+            st.warning("请上传至少一个数据源文件。")
+        elif not key_column: 
+            st.warning("请输入关键列名。")
         else:
             with st.spinner("正在执行精确更新..."):
                 try:
-                    template_df = pd.read_excel(template_file); data_dfs = [pd.read_excel(file) for file in data_source_files]
+                    template_df = pd.read_excel(template_file)
+                    data_dfs = [pd.read_excel(file) for file in data_source_files]
                     result = update_template_file(template_df, data_dfs, key_column)
-                    st.session_state.result = result; st.session_state.download_filename = template_file.name; st.session_state.download_label = f"📥 下载更新后的 {template_file.name}"
-                except Exception as e: st.error(f"更新过程中发生严重错误: {e}")
+                    st.session_state.result = result
+                    st.session_state.download_filename = template_file.name
+                    st.session_state.download_label = f"📥 下载更新后的 {template_file.name}"
+                except Exception as e: 
+                    st.error(f"更新过程中发生严重错误: {e}")
 
 # --- 通用结果显示区域 ---
 st.markdown("---")
@@ -148,9 +228,20 @@ if "result" in st.session_state and st.session_state.result is not None:
     if isinstance(result_data, pd.DataFrame):
         st.dataframe(result_data)
         output_buffer = io.BytesIO()
-        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: result_data.to_excel(writer, index=False, sheet_name='Result')
-        st.download_button(label=st.session_state.get("download_label", "📥 下载结果 (Excel)"), data=output_buffer.getvalue(), file_name=st.session_state.get("download_filename", "result.xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: 
+            result_data.to_excel(writer, index=False, sheet_name='Result')
+        st.download_button(
+            label=st.session_state.get("download_label", "📥 下载结果 (Excel)"), 
+            data=output_buffer.getvalue(), 
+            file_name=st.session_state.get("download_filename", "result.xlsx"), 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     elif isinstance(result_data, str):
-        if result_data.startswith("错误："): st.error(result_data)
-        else: st.write("AI 的回复是文字，而不是表格："); st.code(result_data, language=None)
-st.markdown("---"); st.markdown("由 DeepSeek, PandasAI, and Streamlit 驱动")
+        if result_data.startswith("错误："): 
+            st.error(result_data)
+        else: 
+            st.write("AI 的回复是文字，而不是表格：")
+            st.code(result_data, language=None)
+            
+st.markdown("---")
+st.markdown("由 DeepSeek, PandasAI, and Streamlit 驱动")
