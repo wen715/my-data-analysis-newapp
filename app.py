@@ -17,16 +17,16 @@ class DeepSeekLLM(LLM):
         self.max_retries = 3
         self.retry_delay = 2  # 秒
 
-    # 最终修正：在参数中加入 *args 来接收所有未知的位置参数
     def call(self, prompt: str, *args, **kwargs) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
+        # 最终修正：将 prompt 对象强制转换为字符串
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": str(prompt)}], 
             "temperature": 0.1,
             "max_tokens": 4000
         }
@@ -95,11 +95,13 @@ st.markdown("本应用已配置为安全模式，可供多用户使用。")
 
 # --- 从 Streamlit Secrets 安全获取 DeepSeek API 密钥 ---
 try:
+    # (使用本地测试时，请取消注释下一行，并填入您的密钥)
+    # api_key = "sk-xxxxxxxxxx" 
     if "DEEPSEEK_API_KEY" in st.secrets and st.secrets["DEEPSEEK_API_KEY"]:
         api_key = st.secrets["DEEPSEEK_API_KEY"]
         st.sidebar.success("DeepSeek API 密钥已成功加载", icon="✅")
-    else:
-        st.error("DeepSeek API 密钥未在应用的 Secrets 中正确设置。"); st.stop()
+    # else:
+    #     st.error("DeepSeek API 密钥未在应用的 Secrets 中正确设置。"); st.stop()
 except FileNotFoundError:
     st.error("在本地运行此应用时，请在项目根目录下创建一个 .streamlit/secrets.toml 文件来存放您的 DeepSeek API 密钥。")
     st.code('# 在 .streamlit/secrets.toml 文件中这样写:\nDEEPSEEK_API_KEY = "sk-..."'); st.stop()
