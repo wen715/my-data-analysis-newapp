@@ -7,12 +7,17 @@ from pandasai.llm.base import LLM
 
 class DeepSeekLLM(LLM):
     """优化的DeepSeek LLM集成类"""
-    def __init__(self, api_key: str):
-        super().__init__(api_key)
+    def __init__(self, api_key: str, model: str = "deepseek-chat", temperature: float = 0.3):
+        super().__init__()
+        if not api_key or not isinstance(api_key, str) or not api_key.startswith("sk-"):
+            raise ValueError("无效的API密钥格式")
         self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
         self.api_base = "https://api.deepseek.com/v1"
         self.max_retries = 3
         self.timeout = 30
+        self.last_response = None
 
     def call(self, prompt: str, **kwargs) -> str:
         headers = {
@@ -21,9 +26,9 @@ class DeepSeekLLM(LLM):
         }
         
         payload = {
-            "model": "deepseek-chat",
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
+            "temperature": self.temperature,
             "max_tokens": 3000
         }
         
@@ -117,7 +122,11 @@ def main():
     if st.button("开始分析", type="primary"):
         with st.spinner("正在分析数据..."):
             try:
-                llm = DeepSeekLLM(api_key=api_key)
+                llm = DeepSeekLLM(
+                    api_key=api_key,
+                    model="deepseek-chat",
+                    temperature=0.3
+                )
                 lake = SmartDatalake(data_frames, config={"llm": llm})
                 
                 # 优化的系统提示
