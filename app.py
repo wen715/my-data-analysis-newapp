@@ -78,16 +78,24 @@ def main():
     st.title("📊 智能数据分析专家")
     st.markdown("上传Excel文件，获取专业的分析结果")
     
-    # API密钥设置
-    api_key = get_api_key() or st.text_input(
-        "DeepSeek API密钥",
-        type="password",
-        help="从DeepSeek官网获取API密钥"
+    # 模型选择
+    analysis_method = st.sidebar.radio(
+        "选择分析引擎",
+        options=["DeepSeek API", "本地开源模型", "基础数据分析"],
+        help="根据您的资源选择分析方式"
     )
     
-    if not api_key or not api_key.startswith("sk-"):
-        st.warning("请输入有效的DeepSeek API密钥")
-        st.stop()
+    # DeepSeek API配置
+    if analysis_method == "DeepSeek API":
+        api_key = get_api_key() or st.text_input(
+            "DeepSeek API密钥",
+            type="password",
+            help="从DeepSeek官网获取API密钥"
+        )
+        
+        if not api_key or not api_key.startswith("sk-"):
+            st.warning("请输入有效的DeepSeek API密钥")
+            st.stop()
     
     # 文件上传
     uploaded_files = st.file_uploader(
@@ -190,18 +198,51 @@ def main():
                 error_msg = str(e)
                 st.error(f"分析失败: {error_msg}")
                 
-                # 特别处理配额不足的情况
-                if "配额不足" in error_msg:
+                if "配额不足" in error_msg or "402" in error_msg:
                     st.markdown("""
-                    **解决方案建议:**
-                    1. 访问 [DeepSeek账户页面](https://platform.deepseek.com) 检查配额
-                    2. 升级您的订阅计划
-                    3. 或使用以下免费替代方案:
-                        - 使用本地运行的LLM
-                        - 申请教育版API密钥
+                    **DeepSeek API解决方案:**
+                    - [检查账户余额](https://platform.deepseek.com)
+                    - [升级订阅计划](https://platform.deepseek.com/pricing)
+                    - [申请教育优惠](https://platform.deepseek.com/edu)
+                    
+                    **或切换到:**
+                    - 侧边栏选择"本地开源模型"
+                    - 侧边栏选择"基础数据分析"
                     """)
                 elif "HTTP 4" in error_msg:
                     st.info("建议检查API密钥是否正确或服务是否可用")
+
+    # 本地开源模型选项
+    elif analysis_method == "本地开源模型":
+        st.warning("""
+        **本地模型使用说明:**
+        1. 安装Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
+        2. 运行模型: `ollama pull llama3`
+        3. 确保已安装Python包: `pip install llama-cpp-python`
+        """)
+        
+        if st.button("尝试使用本地模型"):
+            try:
+                from llama_cpp import Llama
+                llm = Llama(model_path="./models/llama3")
+                st.success("本地模型已加载!")
+            except Exception as e:
+                st.error(f"本地模型加载失败: {str(e)}")
+    
+    # 基础数据分析选项
+    else:
+        st.info("""
+        **基础数据分析功能:**
+        - 描述性统计
+        - 数据可视化
+        - 简单计算
+        """)
+        if st.button("显示基础分析"):
+            try:
+                stats = data_frames[0].describe()
+                st.dataframe(stats)
+            except Exception as e:
+                st.error(f"基础分析失败: {str(e)}")
 
 if __name__ == "__main__":
     main()
