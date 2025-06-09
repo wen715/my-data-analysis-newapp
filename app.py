@@ -119,6 +119,9 @@ if ai_uploaded_files:
 <YOUR_ANSWER>
 """
                     
+                    # 添加调试模式开关
+                    debug_mode = st.sidebar.checkbox("启用调试模式", value=False)
+                    
                     lake = SmartDatalake(ai_dataframes, config={"llm": llm})
                     max_retries = 3
                     result = None
@@ -126,12 +129,27 @@ if ai_uploaded_files:
                     for attempt in range(max_retries):
                         try:
                             result = lake.chat(expert_system_prompt)
-                            if result: break
+                            
+                            if debug_mode:
+                                st.sidebar.text_area("原始API响应", value=str(result), height=200)
+                            
+                            # 增强响应验证
+                            if result:
+                                if isinstance(result, str) and ("API请求失败" in result or "错误" in result):
+                                    raise ValueError(f"API返回错误: {result}")
+                                break
+                                
                         except Exception as e:
+                            error_msg = f"尝试 {attempt + 1}/{max_retries} 失败: {str(e)}"
+                            if debug_mode:
+                                st.sidebar.error(error_msg)
+                            
                             if attempt == max_retries - 1:
-                                st.error(f"分析失败(尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                                st.error(f"分析失败: {error_msg}")
+                                if "API请求失败" in str(e):
+                                    st.info("建议检查: API密钥是否有效、网络连接是否正常、服务是否可用")
                             else:
-                                st.warning(f"分析尝试 {attempt + 1}/{max_retries} 失败，正在重试...")
+                                st.warning(f"{error_msg}，正在重试...")
                                 time.sleep(2)
                     
                     st.subheader("📈 分析结果：")
@@ -175,8 +193,15 @@ if ai_uploaded_files:
                         st.warning("AI返回了非标准格式的响应:")
                         st.write(result)
 
+    except pd.errors.EmptyDataError:
+        st.error("错误：上传的文件为空，请检查文件内容")
+    except pd.errors.ParserError:
+        st.error("错误：无法解析上传的文件，请确保是有效的Excel文件")
     except Exception as e:
-        st.error(f"处理文件时发生意外错误: {e}")
+        st.error(f"处理文件时发生意外错误: {str(e)}")
+        if debug_mode:
+            import traceback
+            st.text_area("完整错误堆栈", value=traceback.format_exc(), height=200)
 
 st.markdown("---")
 st.markdown("由 DeepSeek, PandasAI, and Streamlit 驱动")
