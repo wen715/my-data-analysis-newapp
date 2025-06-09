@@ -187,7 +187,21 @@ def main():
                     st.text(response)
                     
             except Exception as e:
-                st.error(f"分析失败: {str(e)}")
+                error_msg = str(e)
+                st.error(f"分析失败: {error_msg}")
+                
+                # 特别处理配额不足的情况
+                if "配额不足" in error_msg:
+                    st.markdown("""
+                    **解决方案建议:**
+                    1. 访问 [DeepSeek账户页面](https://platform.deepseek.com) 检查配额
+                    2. 升级您的订阅计划
+                    3. 或使用以下免费替代方案:
+                        - 使用本地运行的LLM
+                        - 申请教育版API密钥
+                    """)
+                elif "HTTP 4" in error_msg:
+                    st.info("建议检查API密钥是否正确或服务是否可用")
 
 if __name__ == "__main__":
     main()
