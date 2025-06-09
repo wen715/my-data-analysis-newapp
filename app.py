@@ -120,11 +120,28 @@ if ai_uploaded_files:
 """
                     
                     lake = SmartDatalake(ai_dataframes, config={"llm": llm})
-                    result = lake.chat(expert_system_prompt)
+                    max_retries = 3
+                    result = None
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            result = lake.chat(expert_system_prompt)
+                            if result: break
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                st.error(f"分析失败(尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                            else:
+                                st.warning(f"分析尝试 {attempt + 1}/{max_retries} 失败，正在重试...")
+                                time.sleep(2)
                     
                     st.subheader("📈 分析结果：")
                     if result is None:
-                        st.error("AI未返回有效结果，请尝试重新提交请求或修改您的指令。")
+                        st.error("AI未返回有效结果，请尝试：")
+                        st.markdown("""
+                        - 简化您的指令
+                        - 检查数据是否包含所需信息
+                        - 稍后再试
+                        """)
                     elif isinstance(result, (pd.DataFrame, pd.Series)):
                         st.dataframe(result)
                         # 添加下载按钮
@@ -135,9 +152,27 @@ if ai_uploaded_files:
                             file_name='analysis_result.csv',
                             mime='text/csv'
                         )
+                    elif isinstance(result, str) and "```python" in result:
+                        # 提取并显示代码
+                        code_block = result.split("```python")[1].split("```")[0].strip()
+                        st.success("AI生成的执行代码:")
+                        st.code(code_block, language='python')
+                        
+                        # 添加执行按钮
+                        if st.button("执行代码"):
+                            try:
+                                local_vars = {'df': ai_dataframes[0]} if ai_dataframes else {}
+                                exec(code_block, globals(), local_vars)
+                                if 'result' in local_vars:
+                                    st.dataframe(local_vars['result'])
+                                else:
+                                    st.warning("代码执行完成但未生成result变量")
+                            except Exception as e:
+                                st.error(f"代码执行错误: {str(e)}")
                     elif isinstance(result, (str, int, float)):
                         st.metric(label="结果", value=result)
                     else:
+                        st.warning("AI返回了非标准格式的响应:")
                         st.write(result)
 
     except Exception as e:
