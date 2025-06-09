@@ -19,17 +19,22 @@ class DeepSeekLLM(LLM):
         self.timeout = 30
         self.last_response = None
 
-    def call(self, prompt: str, **kwargs) -> str:
+    def call(self, prompt: str, *args, **kwargs) -> str:
+        """兼容父类LLM的call方法签名"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
+        # 从kwargs中获取可选参数或使用默认值
+        model = kwargs.get("model", self.model)
+        temperature = kwargs.get("temperature", self.temperature)
+        
         payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": self.temperature,
-            "max_tokens": 3000
+            "model": model,
+            "messages": [{"role": "user", "content": str(prompt)}],
+            "temperature": float(temperature),
+            "max_tokens": kwargs.get("max_tokens", 3000)
         }
         
         for attempt in range(self.max_retries):
@@ -127,7 +132,14 @@ def main():
                     model="deepseek-chat",
                     temperature=0.3
                 )
-                lake = SmartDatalake(data_frames, config={"llm": llm})
+                lake = SmartDatalake(
+                    data_frames,
+                    config={
+                        "llm": llm,
+                        "verbose": True,  # 启用详细日志
+                        "max_retries": 3  # 与LLM实例保持一致
+                    }
+                )
                 
                 # 优化的系统提示
                 system_prompt = f"""
