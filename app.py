@@ -4,7 +4,7 @@ import numpy as np
 import io
 import os
 from pandasai import SmartDatalake
-from pandasai.llm import OpenAI # 我们仍然使用这个类，但会将其指向 DeepSeek
+from pandasai.llm import LiteLLM # 最终修改：使用 LiteLLM 接口
 
 # --- 页面设置 ---
 st.set_page_config(page_title="智能数据分析助理 (DeepSeek版)", layout="wide")
@@ -104,11 +104,10 @@ with tab1:
                         **用户的请求是**：『{user_prompt}』
                         """
                         
-                        # 初始化 LLM，指向 DeepSeek 服务器
-                        llm = OpenAI(
-                            api_token=st.session_state.api_key, 
-                            model="deepseek-chat", 
-                            api_base="https://api.deepseek.com/v1"
+                        # 最终修改：初始化 LLM，使用专门的 LiteLLM 接口
+                        llm = LiteLLM(
+                            api_key=st.session_state.api_key, 
+                            model="deepseek/deepseek-chat" # 使用 LiteLLM 的标准格式 "提供商/模型名称"
                         )
                         
                         lake = SmartDatalake(ai_dataframes, config={"llm": llm})
