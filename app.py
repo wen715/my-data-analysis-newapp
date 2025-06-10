@@ -85,6 +85,9 @@ def main():
         help="根据您的资源选择分析方式"
     )
     
+    # 初始化api_key变量
+    api_key = None
+    
     # DeepSeek API配置
     if analysis_method == "DeepSeek API":
         api_key = get_api_key() or st.text_input(
@@ -135,17 +138,38 @@ def main():
     if st.button("开始分析", type="primary"):
         with st.spinner("正在分析数据..."):
             try:
-                llm = DeepSeekLLM(
-                    api_key=api_key,
-                    model="deepseek-chat",
-                    temperature=0.3
-                )
+                if analysis_method == "DeepSeek API":
+                    llm = DeepSeekLLM(
+                        api_key=api_key,
+                        model="deepseek-chat",
+                        temperature=0.3
+                    )
+                else:
+                    st.warning("当前选择的分析模式不支持智能代码生成")
+                    st.stop()
+                # 全面的数据预处理
+                for df in data_frames:
+                    # 处理数值列
+                    for col in df.select_dtypes(include=['number']).columns:
+                        # 填充空值
+                        if df[col].isnull().any():
+                            df[col] = df[col].fillna(0)
+                        # 确保不是单个float值
+                        if isinstance(df[col].iloc[0], (float, int)) and len(df[col]) == 1:
+                            df[col] = pd.Series([df[col].iloc[0]])
+                    
+                    # 处理对象/字符串列
+                    for col in df.select_dtypes(include=['object']).columns:
+                        # 确保字符串列可迭代
+                        df[col] = df[col].astype(str)
+                
                 lake = SmartDatalake(
                     data_frames,
                     config={
                         "llm": llm,
-                        "verbose": True,  # 启用详细日志
-                        "max_retries": 3  # 与LLM实例保持一致
+                        "verbose": True,
+                        "max_retries": 3,
+                        "enable_cache": False  # 禁用缓存以避免类型问题
                     }
                 )
                 
@@ -199,13 +223,22 @@ def main():
                 st.error(f"分析失败: {error_msg}")
                 
                 if "配额不足" in error_msg or "402" in error_msg:
-                    st.markdown("""
-                    **DeepSeek API解决方案:**
-                    - [检查账户余额](https://platform.deepseek.com)
-                    - [升级订阅计划](https://platform.deepseek.com/pricing)
-                    - [申请教育优惠](https://platform.deepseek.com/edu)
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("""
+                        **DeepSeek API解决方案:**
+                        - [检查账户余额](https://platform.deepseek.com)
+                        - [升级订阅计划](https://platform.deepseek.com/pricing)
+                        - [申请教育优惠](https://platform.deepseek.com/edu)
+                        """)
                     
-                    **或切换到:**
+                    with col2:
+                        if st.button("自动切换到本地模型"):
+                            st.session_state.analysis_method = "本地开源模型"
+                            st.rerun()
+                    
+                    st.markdown("""
+                    **或手动切换到:**
                     - 侧边栏选择"本地开源模型"
                     - 侧边栏选择"基础数据分析"
                     """)
@@ -214,20 +247,36 @@ def main():
 
     # 本地开源模型选项
     elif analysis_method == "本地开源模型":
-        st.warning("""
-        **本地模型使用说明:**
-        1. 安装Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
-        2. 运行模型: `ollama pull llama3`
-        3. 确保已安装Python包: `pip install llama-cpp-python`
-        """)
-        
-        if st.button("尝试使用本地模型"):
-            try:
-                from llama_cpp import Llama
-                llm = Llama(model_path="./models/llama3")
-                st.success("本地模型已加载!")
-            except Exception as e:
-                st.error(f"本地模型加载失败: {str(e)}")
+        with st.expander("🛠️ 本地模型配置", expanded=True):
+            st.markdown("""
+            **本地模型使用说明:**
+            1. [下载安装Ollama](https://ollama.com)
+            2. 运行模型: `ollama pull llama3`
+            3. 安装Python包: `pip install llama-cpp-python`
+            """)
+            
+            model_ready = st.checkbox("我已完成上述安装配置")
+            
+            if model_ready and st.button("启动本地模型分析"):
+                with st.spinner("正在初始化本地模型..."):
+                    try:
+                        from llama_cpp import Llama
+                        llm = Llama(
+                            model_path="~/.ollama/models/blobs/llama3",
+                            n_ctx=2048,
+                            n_threads=4
+                        )
+                        st.session_state.local_llm = llm
+                        st.success("本地模型已就绪!")
+                        
+                        # 简单问答测试
+                        test_response = llm.create_chat_completion(
+                            messages=[{"role": "user", "content": "你好"}]
+                        )
+                        st.info(f"模型响应测试: {test_response['choices'][0]['message']['content']}")
+                    except Exception as e:
+                        st.error(f"本地模型加载失败: {str(e)}")
+                        st.info("请检查: 1) Ollama是否运行 2) 模型是否下载 3) 依赖是否安装")
     
     # 基础数据分析选项
     else:
