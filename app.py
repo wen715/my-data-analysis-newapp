@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import os
+from builtins import ValueError  # 确保ValueError可用
 from pandasai import SmartDatalake
 from pandasai.llm.base import LLM
 
@@ -13,14 +15,23 @@ class DeepSeekLLM(LLM):
     def __init__(self, api_key: str, model: str = "deepseek-chat", temperature: float = 0.3):
         super().__init__()
         if not api_key or not isinstance(api_key, str):
+            from builtins import ValueError
             raise ValueError("无效的API密钥格式，请检查。")
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
         self.api_base = "https://api.deepseek.com/v1"
         self.max_retries = 3
-        self.timeout = 60  # 延长超时时间以应对复杂查询
+        self._timeout = 60  # 内部超时变量
         self.last_response = None
+
+    @property
+    def timeout(self):
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        self._timeout = value
 
     def call(self, prompt: str, *args, **kwargs) -> str:
         """兼容父类LLM的call方法签名，调用DeepSeek API"""
@@ -152,18 +163,54 @@ def main():
         st.info("请上传Excel文件以开始分析。")
         st.stop()
     
-    # --- 数据读取与预览 ---
-    try:
-        data_frames_dict = {file.name: pd.read_excel(file).fillna(0) for file in uploaded_files}
-        data_frames = list(data_frames_dict.values())
+    # --- 数据预处理和预览 ---
+    @st.cache_data(show_spinner="正在预处理数据...")
+    def preprocess_data(uploaded_files):
+        """统一数据预处理函数"""
+        data_frames_dict = {}
+        for file in uploaded_files:
+            try:
+                # 读取Excel文件
+                df = pd.read_excel(file)
+                
+                # 处理所有类型的空值
+                df = df.fillna(0)  # 处理NaN
+                df = df.replace(r'^\s*$', 0, regex=True)  # 处理空字符串和纯空格
+                df = df.replace('', 0)  # 处理空字符串
+                
+                # 确保数值类型正确
+                for col in df.columns:
+                    if df[col].dtype == object:
+                        try:
+                            df[col] = pd.to_numeric(df[col], errors='ignore')
+                        except:
+                            pass
+                
+                data_frames_dict[file.name] = df
+                
+            except Exception as e:
+                st.error(f"处理文件 {file.name} 时出错: {str(e)}")
+                st.stop()
         
-        st.success(f"成功读取 {len(data_frames)} 个文件。所有空值已自动替换为0。")
+        return data_frames_dict
+
+    # 执行预处理
+    data_frames_dict = preprocess_data(uploaded_files)
+    data_frames = list(data_frames_dict.values())
+    
+    # 显示预处理结果
+    st.success(f"✅ 成功预处理 {len(data_frames)} 个文件")
+    with st.expander("🔍 数据质量报告"):
         for name, df in data_frames_dict.items():
-            with st.expander(f"预览文件: `{name}` (前5行)"):
-                st.dataframe(df.head())
-    except Exception as e:
-        st.error(f"读取文件时发生错误: {e}")
-        st.stop()
+            st.write(f"**文件**: {name}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("总行数", len(df))
+                st.metric("数值列", len(df.select_dtypes(include=['number']).columns))
+            with col2:
+                st.metric("总列数", len(df.columns))
+                st.metric("文本列", len(df.select_dtypes(include=['object']).columns))
+            st.dataframe(df.head(3))
     
     # --- 用户输入分析请求 ---
     st.subheader("📝 分析指令")
@@ -178,11 +225,11 @@ def main():
     }
     
     selected_example = st.selectbox("选择示例指令", list(example_instructions.keys()))
-    st.text_area(
+    analysis_prompt = st.text_area(
         "或自定义您的分析需求",
         height=100,
         value=example_instructions[selected_example],
-        key="analysis_prompt"
+        key="analysis_input"
     )
     
     # 高级选项
@@ -228,14 +275,124 @@ def main():
                 
                 elif isinstance(response, pd.DataFrame):
                     st.dataframe(response)
-                    # 提供下载按钮
-                    csv = response.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        label="📥 下载结果 (CSV)",
-                        data=csv,
-                        file_name="analysis_result.csv",
-                        mime="text/csv",
-                    )
+                    
+                    # 结果回填选项 - 更醒目的UI
+                    st.markdown("---")
+                    st.markdown("### 📤 结果输出方式")
+                    with st.container():
+                        col1, col2 = st.columns([3,7])
+                        with col1:
+                            fill_original = st.checkbox(
+                                "🔁 回填到原文件", 
+                                value=True,
+                                help="将分析结果回填到原始Excel文件，保留所有格式和样式"
+                            )
+                        with col2:
+                            if fill_original:
+                                st.success("已启用回填功能 - 结果将保存回原始文件")
+                            else:
+                                st.info("将生成新的CSV文件")
+                    st.markdown("---")
+                    
+                    if fill_original:
+                        from openpyxl import load_workbook
+                        from io import BytesIO
+                        
+                        with st.status("正在处理回填操作...", expanded=True) as status:
+                            # 处理每个原始文件
+                            for file_idx, file in enumerate(uploaded_files):
+                                try:
+                                    st.write(f"🔧 正在处理文件: {file.name}...")
+                                    
+                                    # 读取原始文件
+                                    file.seek(0)
+                                    wb = load_workbook(file)
+                                    ws = wb.active
+                                    
+                                    # 获取原文件列名和格式
+                                    original_columns = []
+                                    column_formats = {}
+                                    for col in range(1, ws.max_column+1):
+                                        col_name = ws.cell(row=1, column=col).value
+                                        original_columns.append(col_name)
+                                        # 记录列格式(从第二行获取)
+                                        if ws.max_row >= 2:
+                                            sample_cell = ws.cell(row=2, column=col)
+                                            column_formats[col_name] = {
+                                                'number_format': sample_cell.number_format,
+                                                'alignment': sample_cell.alignment,
+                                                'font': sample_cell.font,
+                                                'fill': sample_cell.fill,
+                                                'border': sample_cell.border
+                                            }
+                                    
+                                    # 准备结果数据
+                                    result_df = response.copy()
+                                    
+                                    # 列名匹配检查
+                                    missing_cols = [col for col in original_columns if col not in result_df.columns]
+                                    if missing_cols:
+                                        st.warning(f"⚠️ 原文件中有 {len(missing_cols)} 列在结果中不存在，将保留为空列")
+                                    
+                                    # 重新排列结果列以匹配原文件顺序
+                                    result_df = result_df.reindex(columns=original_columns, fill_value=None)
+                                    
+                                    # 写入数据
+                                    st.write("📝 正在回填数据...")
+                                    for row_idx, row_data in enumerate(result_df.itertuples(index=False), start=2):
+                                        for col_idx, value in enumerate(row_data, start=1):
+                                            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                                            # 应用原格式
+                                            col_name = original_columns[col_idx-1]
+                                            if col_name in column_formats:
+                                                fmt = column_formats[col_name]
+                                                cell.number_format = fmt['number_format']
+                                                cell.alignment = fmt['alignment']
+                                                cell.font = fmt['font']
+                                                cell.fill = fmt['fill']
+                                                cell.border = fmt['border']
+                                    
+                                    # 保存文件
+                                    st.write("💾 正在保存文件...")
+                                    output = BytesIO()
+                                    wb.save(output)
+                                    output.seek(0)
+                                    
+                                    status.update(label=f"✅ 文件 {file.name} 回填完成!", state="complete")
+                                    
+                                    # 提供下载
+                                    st.download_button(
+                                        label=f"📥 下载回填后的文件: {file.name}",
+                                        data=output,
+                                        file_name=f"updated_{file.name}",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        help="点击下载已回填结果的Excel文件，将保留原文件的所有格式和公式"
+                                    )
+                                    
+                                    # 显示回填摘要
+                                    with st.expander(f"🔍 回填摘要: {file.name}"):
+                                        st.write(f"原文件列数: {len(original_columns)}")
+                                        st.write(f"结果数据列数: {len(response.columns)}")
+                                        st.write(f"匹配列数: {len(set(original_columns) & set(response.columns))}")
+                                        st.dataframe(result_df.head(3))
+                                    
+                                except Exception as e:
+                                    st.error(f"❌ 回填文件 {file.name} 时出错: {str(e)}")
+                                    st.error("""
+                                    常见解决方法:
+                                    1. 检查原文件是否受保护或损坏
+                                    2. 确保分析结果包含必要的列
+                                    3. 尝试简化分析指令
+                                    """)
+                    else:
+                        # 提供CSV下载
+                        csv = response.to_csv(index=False).encode("utf-8-sig")
+                        st.download_button(
+                            label="📥 下载结果 (CSV)",
+                            data=csv,
+                            file_name="analysis_result.csv",
+                            mime="text/csv",
+                        )
                 
                 elif isinstance(response, (str, int, float)):
                     st.markdown(f"### {response}")
