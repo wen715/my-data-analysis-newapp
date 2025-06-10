@@ -2,5 +2,5 @@ streamlit
 pandas
 numpy
 openpyxl
-pandasai
 requests
+pandasai
