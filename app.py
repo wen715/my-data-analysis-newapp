@@ -147,21 +147,35 @@ def main():
                 else:
                     st.warning("当前选择的分析模式不支持智能代码生成")
                     st.stop()
-                # 全面的数据预处理
-                for df in data_frames:
-                    # 处理数值列
-                    for col in df.select_dtypes(include=['number']).columns:
-                        # 填充空值
-                        if df[col].isnull().any():
-                            df[col] = df[col].fillna(0)
-                        # 确保不是单个float值
-                        if isinstance(df[col].iloc[0], (float, int)) and len(df[col]) == 1:
-                            df[col] = pd.Series([df[col].iloc[0]])
+                # 增强型数据预处理和验证
+                st.session_state.debug_info = []
+                for i, df in enumerate(data_frames):
+                    debug_msg = f"处理数据框 {i+1}/{len(data_frames)}: {len(df)}行×{len(df.columns)}列"
+                    st.session_state.debug_info.append(debug_msg)
                     
-                    # 处理对象/字符串列
-                    for col in df.select_dtypes(include=['object']).columns:
-                        # 确保字符串列可迭代
-                        df[col] = df[col].astype(str)
+                    # 验证并转换所有列
+                    for col in df.columns:
+                        # 记录列类型信息
+                        col_type = str(df[col].dtype)
+                        st.session_state.debug_info.append(f"列 '{col}': 类型 {col_type}")
+                        
+                        # 处理数值列
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            # 填充空值并确保可迭代
+                            if df[col].isnull().any():
+                                df[col] = df[col].fillna(0)
+                            # 确保不是单个float值
+                            if len(df[col]) == 1:
+                                df[col] = pd.Series([df[col].iloc[0]], dtype='float64')
+                        
+                        # 处理非数值列
+                        else:
+                            # 确保所有值都是可迭代的
+                            df[col] = df[col].astype(str)
+                            if len(df[col]) == 1:
+                                df[col] = pd.Series([df[col].iloc[0]])
+                    
+                    st.session_state.debug_info.append(f"处理后验证: {df.info()}")
                 
                 lake = SmartDatalake(
                     data_frames,
