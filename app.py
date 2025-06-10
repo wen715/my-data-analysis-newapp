@@ -170,8 +170,12 @@ def main():
         data_frames_dict = {}
         for file in uploaded_files:
             try:
-                # 读取Excel文件
+                # 读取Excel文件并处理列名
                 df = pd.read_excel(file)
+                
+                # 重命名未命名列
+                df.columns = [f"Column_{i}" if col.startswith('Unnamed') else col 
+                            for i, col in enumerate(df.columns, 1)]
                 
                 # 处理所有类型的空值
                 df = df.fillna(0)  # 处理NaN
@@ -252,31 +256,267 @@ def main():
                 # 初始化 LLM
                 llm = DeepSeekLLM(api_key=api_key)
 
-                # 初始化 PandasAI 的 SmartDatalake
-                # 它会自动处理多个DataFrame
+                # 初始化 PandasAI 的 SmartDatalake 并优化配置
                 lake = SmartDatalake(
                     data_frames,
                     config={
                         "llm": llm,
-                        "verbose": True,        # 在终端打印详细日志，方便调试
-                        "enable_cache": False   # 禁用缓存，确保每次都是实时分析
+                        "verbose": True,        # 在终端打印详细日志
+                        "enable_cache": True,   # 启用缓存提高一致性
+                        "max_retries": 3,       # 增加重试次数
+                        "custom_instructions": """
+                            你是一个严谨的数据分析师，请确保：
+                            1. 计算结果精确到小数点后6位
+                            2. 使用稳定的算法
+                            3. 对结果进行双重验证
+                            4. 避免随机性
+                        """,
+                        "response_parser": {
+                            "structured": True,  # 强制结构化输出
+                            "enforce_schema": True
+                        }
                     }
                 )
                 
-                # 直接将用户的自然语言问题传递给 chat 方法
-                response = lake.chat(analysis_prompt)
+                # 优化分析请求提示词
+                detailed_prompt = f"""
+                请严格按照以下要求执行数据分析:
                 
-                st.subheader("💡 分析结果")
+                分析需求: {analysis_prompt}
+                
+                计算要求:
+                1. 使用精确计算方法，避免近似
+                2. 分步计算并验证每一步结果
+                3. 最终结果保留{precision}位小数
+                4. 使用确定性算法，确保结果一致
+                5. 对关键计算进行双重校验
+                
+                输出格式:
+                1. 详细计算步骤及验证过程
+                2. 中间结果表
+                3. 最终汇总结果
+                """
+                
+                # 响应处理器类
+                class ResponseHandler:
+                    @staticmethod
+                    def handle_response(raw_response):
+                        """安全处理各种类型的响应"""
+                        st.write("🔍 开始处理响应数据...")
+                        
+                        # 类型安全检查
+                        if raw_response is None:
+                            raise ValueError("响应数据为空")
+                            
+                        # 调试信息
+                        st.write(f"📊 响应类型: {type(raw_response)}")
+                        if isinstance(raw_response, dict):
+                            st.write(f"🔑 字典键: {list(raw_response.keys())}")
+                        
+                        # 分类型处理
+                        handler_map = {
+                            pd.DataFrame: ResponseHandler._handle_dataframe,
+                            dict: ResponseHandler._handle_dict,
+                            str: ResponseHandler._handle_string,
+                            list: ResponseHandler._handle_list
+                        }
+                        
+                        for data_type, handler in handler_map.items():
+                            if isinstance(raw_response, data_type):
+                                result = handler(raw_response)
+                                if result is not None:
+                                    return result
+                                
+                        # 未知类型处理
+                        return ResponseHandler._handle_unknown(raw_response)
+                    
+                    @staticmethod
+                    def _handle_dataframe(df):
+                        """处理DataFrame类型响应"""
+                        if not isinstance(df, pd.DataFrame):
+                            return None
+                            
+                        st.write("✅ 获取到DataFrame响应")
+                        if df.empty:
+                            st.warning("⚠️ DataFrame为空")
+                            return None
+                            
+                        st.write(f"📐 DataFrame形状: {df.shape}")
+                        return df.copy()
+                    
+                    @staticmethod
+                    def _handle_dict(data_dict):
+                        """处理字典类型响应"""
+                        if not isinstance(data_dict, dict):
+                            return None
+                            
+                        st.write("✅ 获取到字典响应")
+                        
+                        # 尝试多种转换方式
+                        converters = [
+                            ResponseHandler._convert_dict_to_dataframe,
+                            ResponseHandler._convert_nested_dict,
+                            ResponseHandler._convert_simple_dict
+                        ]
+                        
+                        for converter in converters:
+                            try:
+                                result = converter(data_dict)
+                                if result is not None and not result.empty:
+                                    return result
+                            except Exception as e:
+                                st.warning(f"⚠️ 字典转换尝试失败: {str(e)}")
+                                
+                        return None
+                    
+                    @staticmethod
+                    def _handle_string(text):
+                        """处理字符串类型响应"""
+                        if not isinstance(text, str) or not text.strip():
+                            return None
+                            
+                        st.write("✅ 获取到文本响应")
+                        return pd.DataFrame({"结果": [text.strip()]})
+                    
+                    @staticmethod
+                    def _handle_list(data_list):
+                        """处理列表类型响应"""
+                        if not isinstance(data_list, list):
+                            return None
+                            
+                        st.write("✅ 获取到列表响应")
+                        try:
+                            return pd.DataFrame(data_list)
+                        except Exception as e:
+                            st.warning(f"⚠️ 列表转换失败: {str(e)}")
+                            return None
+                    
+                    @staticmethod
+                    def _handle_unknown(data):
+                        """处理未知类型响应"""
+                        st.warning("⚠️ 未知响应类型")
+                        try:
+                            return pd.DataFrame([str(data)])
+                        except Exception as e:
+                            st.error(f"❌ 无法处理响应数据: {str(e)}")
+                            return None
+                    
+                    @staticmethod
+                    def _convert_dict_to_dataframe(data_dict):
+                        """标准字典转换"""
+                        return pd.DataFrame(data_dict)
+                    
+                    @staticmethod
+                    def _convert_nested_dict(data_dict):
+                        """嵌套字典转换"""
+                        if not all(isinstance(v, (dict, list, pd.Series)) for v in data_dict.values()):
+                            return None
+                        return pd.DataFrame.from_dict(data_dict, orient='columns')
+                    
+                    @staticmethod
+                    def _convert_simple_dict(data_dict):
+                        """简单键值对转换"""
+                        return pd.DataFrame([data_dict])
+                
+                # 执行分析并处理响应
+                response = None
+                for attempt in range(3):
+                    st.write(f"🔄 分析尝试 {attempt + 1}/3")
+                    try:
+                        raw_response = lake.chat(detailed_prompt)
+                        response = ResponseHandler.handle_response(raw_response)
+                        
+                        if response is not None and not response.empty:
+                            st.success("✅ 成功获取有效响应")
+                            break
+                            
+                    except Exception as e:
+                        st.error(f"⚠️ 分析失败: {str(e)}")
+                        st.exception(e)
+                        time.sleep(1)
+                
+                if response is None:
+                    raise ValueError("❌ 所有分析尝试均失败，请检查输入数据")
+                elif response.empty:
+                    raise ValueError("⚠️ 获取到空结果，请调整分析参数")
+                
+                st.subheader("🧮 详细计算过程")
                 st.markdown("---")
-
+                
                 # --- 智能结果展示 ---
                 if response is None:
                     st.warning("分析未能返回有效结果，请尝试调整您的问题。")
                 
                 elif isinstance(response, pd.DataFrame):
-                    st.dataframe(response)
+                    try:
+                        # 安全处理响应数据
+                        st.write("?? 正在准备响应数据...")
+                        
+                        # 确保响应是DataFrame
+                        response_df = response.copy() if isinstance(response, pd.DataFrame) else pd.DataFrame([response])
+                        
+                        # 结果展示处理器
+                        class ResultDisplayer:
+                            @staticmethod
+                            def show_calculation_steps(df):
+                                if "计算步骤" not in df.columns:
+                                    return
+                                    
+                                with st.expander("📝 计算步骤详解", expanded=True):
+                                    steps = df["计算步骤"]
+                                    if isinstance(steps, pd.Series) and len(steps) > 0:
+                                        st.write("### 详细计算流程")
+                                        for i, step in enumerate(steps.dropna(), 1):
+                                            st.write(f"{i}. {step}")
+                                    else:
+                                        st.info("ℹ️ 无详细计算步骤记录")
+                            
+                            @staticmethod
+                            def show_interim_results(df, precision):
+                                if "中间结果" not in df.columns:
+                                    return
+                                    
+                                with st.expander("🔍 查看中间结果", expanded=False):
+                                    interim = df["中间结果"]
+                                    if isinstance(interim, pd.DataFrame) and not interim.empty:
+                                        st.write("### 中间计算结果")
+                                        st.dataframe(interim.style.format(precision=precision))
+                                    elif isinstance(interim, (pd.Series, list)) and len(interim) > 0:
+                                        st.write("### 中间计算结果")
+                                        st.write(interim)
+                                    else:
+                                        st.info("ℹ️ 无中间结果记录")
+                        
+                        # 显示计算结果
+                        ResultDisplayer.show_calculation_steps(response_df)
+                        ResultDisplayer.show_interim_results(response_df, precision)
+                        
+                        # 安全准备最终结果
+                        final_result = response_df.copy()
+                        cols_to_drop = [col for col in ["计算步骤", "中间结果"] 
+                                      if col in response_df.columns]
+                        if cols_to_drop:
+                            final_result = final_result.drop(columns=cols_to_drop, errors='ignore')
+                        
+                        # 显示最终结果
+                        st.subheader("💡 最终分析结果")
+                        if isinstance(final_result, pd.DataFrame):
+                            if not final_result.empty:
+                                st.dataframe(final_result)
+                            else:
+                                st.warning("结果数据为空")
+                        elif isinstance(final_result, str):
+                            st.write(final_result)
+                        else:
+                            st.warning(f"无法识别的结果格式: {type(final_result)}")
+                            st.write(str(final_result))
+                            
+                    except Exception as e:
+                        st.error(f"处理分析结果时出错: {str(e)}")
+                        st.info("正在尝试显示原始结果...")
+                        st.dataframe(response)
                     
-                    # 结果回填选项 - 更醒目的UI
+                    # 结果回填选项 - 适配新格式
                     st.markdown("---")
                     st.markdown("### 📤 结果输出方式")
                     with st.container():
@@ -289,9 +529,18 @@ def main():
                             )
                         with col2:
                             if fill_original:
-                                st.success("已启用回填功能 - 结果将保存回原始文件")
+                                st.success("已启用回填功能 - 最终结果将保存回原始文件")
                             else:
-                                st.info("将生成新的CSV文件")
+                                st.info("将生成包含完整计算过程的新文件")
+                    
+                    # 添加完整报告下载选项
+                    st.download_button(
+                        label="📥 下载完整计算报告",
+                        data=response.to_csv(index=False).encode("utf-8"),
+                        file_name="detailed_analysis_report.csv",
+                        mime="text/csv",
+                        help="下载包含所有计算步骤和中间结果的完整报告"
+                    )
                     st.markdown("---")
                     
                     if fill_original:
@@ -326,16 +575,38 @@ def main():
                                                 'border': sample_cell.border
                                             }
                                     
-                                    # 准备结果数据
-                                    result_df = response.copy()
+                                    # 安全地准备结果数据
+                                    result_df = response.copy() if isinstance(response, pd.DataFrame) else pd.DataFrame()
                                     
-                                    # 列名匹配检查
-                                    missing_cols = [col for col in original_columns if col not in result_df.columns]
+                                    # 列名匹配检查和处理
+                                    original_columns = [col for col in original_columns 
+                                                      if col is not None and not str(col).startswith('Unnamed')]
+                                    result_columns = [col for col in result_df.columns 
+                                                    if col is not None and not str(col).startswith('Unnamed')]
+                                    
+                                    # 安全地检查列名匹配
+                                    missing_cols = [col for col in original_columns 
+                                                  if col not in result_columns and pd.notna(col)]
+                                    extra_cols = [col for col in result_columns 
+                                                if col not in original_columns and pd.notna(col)]
+                                    
                                     if missing_cols:
                                         st.warning(f"⚠️ 原文件中有 {len(missing_cols)} 列在结果中不存在，将保留为空列")
+                                        st.write("缺失列:", missing_cols)
+                                        st.info("提示：未命名列(Unnamed)已自动忽略")
+                                    
+                                    if extra_cols:
+                                        st.warning(f"⚠️ 结果中有 {len(extra_cols)} 列在原文件中不存在，将不会被回填")
+                                        st.write("额外列:", extra_cols)
+                                        st.info("提示：未命名列(Unnamed)已自动忽略")
+                                    
+                                    # 确保保留所有原始列
+                                    for col in original_columns:
+                                        if col not in result_df.columns:
+                                            result_df[col] = None
                                     
                                     # 重新排列结果列以匹配原文件顺序
-                                    result_df = result_df.reindex(columns=original_columns, fill_value=None)
+                                    result_df = result_df[original_columns]
                                     
                                     # 写入数据
                                     st.write("📝 正在回填数据...")
@@ -378,11 +649,17 @@ def main():
                                     
                                 except Exception as e:
                                     st.error(f"❌ 回填文件 {file.name} 时出错: {str(e)}")
+                                    with st.expander("🛠️ 详细调试信息"):
+                                        st.write("原文件列名:", original_columns)
+                                        st.write("结果列名:", response.columns.tolist())
+                                        st.write("错误详情:", str(e))
+                                    
                                     st.error("""
-                                    常见解决方法:
-                                    1. 检查原文件是否受保护或损坏
-                                    2. 确保分析结果包含必要的列
-                                    3. 尝试简化分析指令
+                                    🚨 常见解决方法:
+                                    1. 检查列名是否完全匹配
+                                    2. 修改分析指令明确指定列名
+                                    3. 检查文件是否受保护
+                                    4. 尝试简化分析需求
                                     """)
                     else:
                         # 提供CSV下载
