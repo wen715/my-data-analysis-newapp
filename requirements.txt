@@ -1,6 +1,6 @@
-streamlit
-pandas
-numpy
-openpyxl
-requests
-pandasai
+streamlit==1.35.0
+pandas==1.5.3
+numpy==1.26.4
+pandasai==2.0.16
+requests==2.32.3
+openpyxl==3.1.2

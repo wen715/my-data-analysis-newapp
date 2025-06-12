@@ -5,92 +5,20 @@ import io
 import os
 import requests
 import time
-from pandasai import SmartDatalake
 from pandasai.llm.base import LLM
+from pandasai import SmartDatalake
 
-# --- 核心功能函数区域 ---
-
-# 1. 强力数据清洗函数
-def clean_and_convert_to_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """将DataFrame中看起来像数字的文本列强制转换为数值类型"""
-    df_clean = df.copy()
-    for col in df_clean.columns:
-        if df_clean[col].dtype == 'object':
-            # 尝试移除千位分隔符等非数字字符，然后转换
-            try:
-                cleaned_series = df_clean[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                # 强制转换为数值，无法转换的值会变成NaN（Not a Number）
-                numeric_series = pd.to_numeric(cleaned_series, errors='coerce')
-                # 只有当转换后至少有一个有效数字时，才替换原始列
-                if not numeric_series.isna().all():
-                    df_clean[col] = numeric_series
-            except Exception:
-                # 如果在转换中发生任何意外，则保持该列不变
-                pass
-    return df_clean
-
-# 2. 最终版的数据回填函数
-def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns: list) -> pd.DataFrame:
-    """根据多个关键列匹配，对数值列求和，并回填到模板中"""
-    
-    # 首先对所有输入文件进行数据清洗
-    cleaned_template_df = clean_and_convert_to_numeric(template_df)
-    cleaned_source_dfs = [clean_and_convert_to_numeric(df) for df in source_dfs]
-
-    # 验证关键列是否存在
-    if not all(key in cleaned_template_df.columns for key in key_columns):
-        missing_keys = [key for key in key_columns if key not in cleaned_template_df.columns]
-        raise ValueError(f"错误：关键列 {missing_keys} 在模板文件中不存在。")
-
-    # 统一关键列的数据类型为字符串，以确保匹配成功
-    for df in [cleaned_template_df] + cleaned_source_dfs:
-        for key in key_columns:
-            if key in df.columns:
-                df[key] = df[key].astype(str).str.strip()
-
-    # 合并所有有效的数据源
-    all_sources = [df.copy() for df in cleaned_source_dfs if all(key in df.columns for key in key_columns)]
-    if not all_sources:
-        raise ValueError("错误：所有数据源文件中都不完整包含您输入的全部关键列。")
-    
-    combined_sources = pd.concat(all_sources, ignore_index=True)
-    
-    # 定义聚合规则：数值列求和，其他列取第一个
-    agg_functions = {}
-    for col in combined_sources.columns:
-        if col not in key_columns:
-            if pd.api.types.is_numeric_dtype(combined_sources[col]):
-                agg_functions[col] = 'sum'
-            else:
-                agg_functions[col] = 'first'
-    
-    if not agg_functions: return cleaned_template_df
-    
-    # 按多关键列分组并聚合
-    aggregated_source = combined_sources.groupby(key_columns).agg(agg_functions).reset_index()
-    source_data_lookup = aggregated_source.set_index(key_columns)
-
-    # 迭代并填充模板
-    filled_df = cleaned_template_df.copy()
-    for index, row in filled_df.iterrows():
-        key_values = tuple(str(row.get(key, '')) for key in key_columns)
-        
-        if key_values in source_data_lookup.index:
-            source_row = source_data_lookup.loc[key_values]
-            for col_name in filled_df.columns:
-                is_empty_or_zero = pd.isna(row[col_name]) or (np.isscalar(row[col_name]) and isinstance(row[col_name], (int, float, np.number)) and row[col_name] == 0)
-                if is_empty_or_zero:
-                    if col_name in source_row.index and not pd.isna(source_row[col_name]):
-                        filled_df.loc[index, col_name] = source_row[col_name]
-    return filled_df
-
-# 3. AI 调用类 (保持不变)
+# -------------------------------------------------------------------
+# 模块一: 自定义的 AI 模型接口 (保持不变)
+# -------------------------------------------------------------------
 class DeepSeekLLM(LLM):
-    def __init__(self, api_key: str, model: str = "deepseek-chat"):
-        self.api_key = api_key; self.model = model; self.api_base = "https://api.deepseek.com/v1"
+    """优化的DeepSeek LLM集成类"""
+    def __init__(self, api_key: str, model: str = "deepseek-chat", temperature: float = 0.1):
+        super().__init__()
+        self.api_key = api_key; self.model = model; self.temperature = temperature; self.api_base = "https://api.deepseek.com/v1"
     def call(self, prompt: str, *args, **kwargs) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        payload = {"model": self.model, "messages": [{"role": "user", "content": str(prompt)}], "temperature": 0.0}
+        payload = {"model": self.model, "messages": [{"role": "user", "content": str(prompt)}], "temperature": self.temperature, "max_tokens": 4096}
         try:
             response = requests.post(f"{self.api_base}/chat/completions", headers=headers, json=payload, timeout=60)
             response.raise_for_status()
@@ -100,70 +28,273 @@ class DeepSeekLLM(LLM):
     @property
     def type(self) -> str: return "deepseek-llm"
 
+# -------------------------------------------------------------------
+# 模块二: 最终版的数据回填函数（增加专家级清洗和调试）
+# -------------------------------------------------------------------
+def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns: list, columns_to_fill: list, 
+                      template_path: str = None, inplace: bool = False) -> pd.DataFrame:
+    """
+    根据多个关键列匹配，对指定列进行求和并回填。
+    参数:
+        template_path: 模板文件路径，如果提供且inplace=True则直接修改该文件
+        inplace: 是否直接修改模板文件
+    """
+    
+    # 专家级数据清洗函数
+    def expert_clean_df(df):
+        df_clean = df.copy()
+        for col in df_clean.columns:
+            # 只对字符串类型执行字符串操作
+            if pd.api.types.is_string_dtype(df_clean[col]):
+                df_clean[col] = df_clean[col].astype(str).str.strip()
+            # 尝试转换为数值
+            try:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors='ignore')
+            except:
+                pass
+        return df_clean
 
-# --- Streamlit 应用主界面 ---
-st.set_page_config(page_title="智能数据处理与分析平台", page_icon="📊", layout="wide")
-st.title("📊 智能数据处理与分析平台")
+    cleaned_template_df = expert_clean_df(template_df)
+    cleaned_source_dfs = [expert_clean_df(df) for df in source_dfs]
 
-with st.sidebar:
-    st.header("🔑 API 密钥")
-    api_key = st.text_input("DeepSeek API密钥", type="password", help="从DeepSeek官网获取API密钥")
+    # 改进关键列处理 - 保留原始格式用于匹配
+    for df in [cleaned_template_df] + cleaned_source_dfs:
+        for key in key_columns:
+            if key in df.columns:
+                # 保留原始值用于调试
+                df['_original_'+key] = df[key]  
+                # 标准化处理
+                df[key] = df[key].fillna('N/A').astype(str).str.strip().str.lower().str.replace(r'\s+', '', regex=True)
 
-tab1, tab2 = st.tabs(["✍️ 数据回填 (最终版)", "🧠 智能分析"])
-
-# 数据回填分页
-with tab1:
-    st.header("将源数据回填到模板文件")
-    st.info("此最终版功能会自动深度清洗数据，并根据多个关键列匹配，将数值求和后填充。")
+    valid_sources = [df for df in cleaned_source_dfs if all(key in df.columns for key in key_columns)]
+    if not valid_sources: raise ValueError("数据源文件中缺少部分或全部关键列。")
+    
+    combined_sources = pd.concat(valid_sources, ignore_index=True)
+    
+    # 改进聚合逻辑 - 保留文本列
+    agg_functions = {}
+    for col in columns_to_fill:
+        if col in combined_sources.columns:
+            if pd.api.types.is_numeric_dtype(combined_sources[col]):
+                agg_functions[col] = 'sum'
+            else:
+                agg_functions[col] = 'first'  # 保留第一个非空值
+    
+    if not agg_functions: return cleaned_template_df
+    
+    # 识别并保留特殊行（如"项目"、"一"等）
+    special_rows = combined_sources[
+        combined_sources[key_columns[0]].astype(str).str.contains('项目|一|—', regex=True)
+    ]
+    
+    # 执行常规聚合
+    aggregated_source = combined_sources.groupby(key_columns, as_index=False).agg(agg_functions)
+    
+    # 合并特殊行和聚合结果
+    aggregated_source = pd.concat([special_rows, aggregated_source]).drop_duplicates(subset=key_columns, keep='first')
+    
+    # --- 调试信息将直接显示 ---
     st.markdown("---")
+    st.subheader("⚙️ 调试诊断信息 (请仔细比对以下两个表格)")
+    st.write("**1. 模板文件关键列 (清洗后用于匹配的值):**")
+    st.dataframe(cleaned_template_df[key_columns].head())
+    st.write("**2. 源数据关键列 (清洗并聚合后用于匹配的值):**")
+    st.dataframe(aggregated_source[key_columns].head())
+    st.markdown("---")
+    
+    for key in key_columns:
+        cleaned_template_df[key] = cleaned_template_df[key].astype(str)
+        
+    # 添加调试信息
+    st.write("**合并前模板数据样本:**")
+    st.dataframe(cleaned_template_df.head())
+    st.write("**合并前分析结果样本:**")
+    st.dataframe(aggregated_source.head())
+    
+    # 改进合并逻辑 - 处理非唯一键
+    # 先为模板数据添加临时索引列
+    cleaned_template_df['_temp_index'] = range(len(cleaned_template_df))
+    
+    # 执行合并，不验证一对一关系
+    # 改进合并逻辑 - 添加调试信息
+    st.write("**关键列匹配详情:**")
+    st.write(f"模板数据关键列值: {cleaned_template_df[key_columns].head().to_dict()}")
+    st.write(f"源数据关键列值: {aggregated_source[key_columns].head().to_dict()}")
+    
+    # 执行合并并显示未匹配记录
+    merged_df = pd.merge(
+        cleaned_template_df,
+        aggregated_source,
+        on=key_columns,
+        how='left',
+        suffixes=('', '_source'),
+        indicator=True  # 添加合并标记
+    )
+    
+    # 显示未匹配的记录
+    unmatched = merged_df[merged_df['_merge'] == 'left_only']
+    if not unmatched.empty:
+        st.warning(f"发现 {len(unmatched)} 条未匹配记录")
+        st.dataframe(unmatched[key_columns + ['_merge']])
+    
+    merged_df = merged_df.drop(columns=['_merge'])  # 移除合并标记
+    
+    # 按原始顺序恢复并删除临时索引
+    merged_df = merged_df.sort_values('_temp_index').drop(columns=['_temp_index'])
+    
+    # 检查合并结果
+    st.write("**合并后数据样本:**")
+    st.dataframe(merged_df.head())
 
+    for col in columns_to_fill:
+        source_col_name = f"{col}_source"
+        if source_col_name in merged_df.columns:
+            # 改进的空白替换逻辑 - 放宽条件
+            # 只要源数据有值且模板值为空/0/None/空字符串，就进行替换
+            if pd.api.types.is_numeric_dtype(merged_df[col].dtype):
+                mask_to_fill = (merged_df[col].isna()) | (merged_df[col] == 0) | (merged_df[col].astype(str) == "None") | (merged_df[col].astype(str) == "nan")
+            else:
+                mask_to_fill = (merged_df[col].isna()) | (merged_df[col] == "") | (merged_df[col].astype(str) == "None") | (merged_df[col].astype(str) == "nan")
+            
+            # 确保源数据有值时才替换
+            mask_to_fill = mask_to_fill & (~merged_df[source_col_name].isna())
+            
+            # 执行替换
+            merged_df[col] = np.where(
+                mask_to_fill,
+                merged_df[source_col_name],
+                merged_df[col]
+            )
+            merged_df.drop(columns=[source_col_name], inplace=True)
+
+    final_df = merged_df[template_df.columns]
+    for col in final_df.select_dtypes(include=np.number).columns:
+        final_df[col] = final_df[col].fillna(0)
+    
+    # 如果指定了模板路径且需要直接修改
+    if template_path and inplace:
+        try:
+            # 获取原始文件路径
+            original_path = os.path.abspath(template_path)
+            # 创建临时副本(使用.xlsx扩展名)
+            temp_path = os.path.splitext(original_path)[0] + "_temp.xlsx"
+            
+            # 写入修改后的数据到临时文件
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False)
+            
+            # 替换原始文件
+            if os.path.exists(original_path):
+                os.remove(original_path)
+            os.rename(temp_path, original_path)
+            
+            st.success(f"已成功修改本地文件: {original_path}")
+        except Exception as e:
+            st.error(f"直接修改文件失败: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        
+    return final_df
+
+# -------------------------------------------------------------------
+# 主程序: Streamlit 界面逻辑 (简化版)
+# -------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="智能数据分析平台", page_icon="🧠", layout="wide")
+    st.title("🧠 智能数据分析平台")
+
+    with st.sidebar:
+        st.header("🔑 API 密钥")
+        api_key = st.text_input("DeepSeek API密钥", type="password", help="从DeepSeek官网获取API密钥")
+
+    st.header("AI 智能分析")
+    st.info("上传数据文件并用自然语言提问，AI会自动分析并可将结果填入指定模板。")
+    
+    # 文件上传区域
     col1, col2 = st.columns(2)
     with col1:
-        source_files = st.file_uploader("1. 上传一个或多个数据源文件", type=["xlsx", "xls"], accept_multiple_files=True, key="source_files")
+        data_files = st.file_uploader("上传数据文件", type=["xlsx", "xls"], accept_multiple_files=True)
     with col2:
-        template_file = st.file_uploader("2. 上传一个空白的模板文件", type=["xlsx", "xls"], key="template_file")
-    
-    key_column_input = st.text_input("3. 请输入一个或多个关键列名，用英文逗号隔开", "部门,费用项目", help="例如：部门,费用项目")
-
-    if st.button("开始回填", type="primary", use_container_width=True, key="start_fill_data"):
-        if not source_files or not template_file or not key_column_input.strip():
-            st.warning("请确保已上传数据源、模板文件，并已输入关键列名。")
+        template_option = st.radio("模板文件来源", 
+                                 ["上传模板文件", "指定本地文件路径"],
+                                 help="选择直接修改本地文件或上传模板文件")
+        
+        if template_option == "上传模板文件":
+            template_file = st.file_uploader("上传模板文件", type=["xlsx", "xls"])
+            local_path = None
         else:
-            with st.spinner("正在深度清洗、分组求和并回填数据..."):
-                try:
-                    key_columns_list = [key.strip() for key in key_column_input.split(',')]
-                    source_dfs = [pd.read_excel(f) if f.name.endswith('xlsx') else pd.read_csv(f) for f in source_files]
-                    template_df = pd.read_excel(template_file) if template_file.name.endswith('xlsx') else pd.read_csv(template_file)
-                    
-                    filled_df = fill_template_final(template_df, source_dfs, key_columns_list)
-                    
-                    st.success("数据回填成功！")
-                    st.dataframe(filled_df)
-                    
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        filled_df.to_excel(writer, index=False, sheet_name="Final_Filled_Template")
-                    excel_data = output.getvalue()
-                    
-                    st.download_button(label="📥 下载已回填的模板文件", data=excel_data, file_name=f"final_filled_{template_file.name}")
-                except Exception as e:
-                    st.error(f"回填过程中发生错误: {e}")
+            local_path = st.text_input("本地模板文件路径", 
+                                     placeholder="例如: e:/电工杯/templates/report_template.xlsx")
+            template_file = None
 
-# 智能分析分页
-with tab2:
-    st.header("使用 AI 进行通用的、探索性的数据分析")
-    if not api_key or not api_key.startswith("sk-"): st.warning("请输入有效的DeepSeek API密钥以启用“智能分析”功能。")
-    ai_uploaded_files_tab2 = st.file_uploader("上传用于AI分析的Excel文件", type=["xlsx", "xls"], accept_multiple_files=True, key="ai_uploader_tab2")
-    if ai_uploaded_files_tab2 and api_key.startswith("sk-"):
-        analysis_prompt = st.text_area("您的分析需求", height=100, key="analysis_input")
-        if st.button("开始智能分析", type="primary", use_container_width=True, key="start_ai_analysis"):
-            if analysis_prompt.strip():
-                with st.spinner("AI正在思考中..."):
-                    try:
-                        llm = DeepSeekLLM(api_key=api_key)
-                        data_frames = [pd.read_excel(f) for f in ai_uploaded_files_tab2]
-                        lake = SmartDatalake(data_frames, config={"llm": llm})
-                        response = lake.chat(analysis_prompt)
-                        st.subheader("分析结果")
-                        st.write(response)
-                    except Exception as e: st.error(f"分析过程中发生严重错误：\n\n{e}")
+    # 分析请求输入
+    prompt = st.text_area("分析需求", height=100, 
+                        placeholder="例如: 计算各产品的销售总额并填入模板")
+
+    if st.button("开始分析", type="primary", use_container_width=True):
+        if not api_key or not api_key.startswith("sk-"):
+            st.warning("请输入有效的API密钥。")
+        elif not data_files:
+            st.warning("请上传至少一个数据文件。")
+        elif not prompt.strip():
+            st.warning("请输入您的分析需求。")
+        else:
+            with st.spinner("AI 正在分析中..."):
+                try:
+                    # 读取数据文件
+                    dfs = [pd.read_excel(f) for f in data_files]
+                    
+                    # 初始化AI模型
+                    llm = DeepSeekLLM(api_key=api_key)
+                    lake = SmartDatalake(dfs, config={"llm": llm})
+                    
+                    # 执行分析
+                    result = lake.chat(prompt)
+                    
+                    # 显示分析结果
+                    st.subheader("分析结果")
+                    if isinstance(result, pd.DataFrame):
+                        st.dataframe(result)
+                        
+                        # 处理模板文件
+                        if template_option == "上传模板文件" and template_file:
+                            template_df = pd.read_excel(template_file)
+                            # 使用fill_template_final函数处理
+                            result_df = fill_template_final(
+                                template_df, [result], 
+                                key_columns=template_df.columns.tolist()[:1],  # 使用第一列作为关键列
+                                columns_to_fill=result.columns.tolist()
+                            )
+                            
+                            # 提供下载
+                            output = io.BytesIO()
+                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                result_df.to_excel(writer, index=False)
+                            st.download_button(
+                                "下载填入模板的结果", 
+                                output.getvalue(), 
+                                "analysis_result_in_template.xlsx"
+                            )
+                        
+                        # 处理本地文件路径
+                        elif template_option == "指定本地文件路径" and local_path:
+                            if os.path.exists(local_path):
+                                template_df = pd.read_excel(local_path)
+                                # 直接修改本地文件
+                                result_df = fill_template_final(
+                                    template_df, [result],
+                                    key_columns=template_df.columns.tolist()[:1],
+                                    columns_to_fill=result.columns.tolist(),
+                                    template_path=local_path,
+                                    inplace=True
+                                )
+                            else:
+                                st.error("指定的本地文件路径不存在，请检查路径是否正确")
+                    else:
+                        st.write(result)
+                        
+                except Exception as e:
+                    st.error(f"分析失败: {str(e)}")
+
+if __name__ == "__main__":
+    main()
