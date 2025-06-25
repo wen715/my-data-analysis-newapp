@@ -7,6 +7,10 @@ import requests
 import time
 from pandasai.llm.base import LLM
 from pandasai import SmartDatalake
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import matplotlib.pyplot as plt
+from bs4 import BeautifulSoup
+import re
 
 # -------------------------------------------------------------------
 # 模块一: 自定义的 AI 模型接口 (保持不变)
@@ -16,6 +20,7 @@ class DeepSeekLLM(LLM):
     def __init__(self, api_key: str, model: str = "deepseek-chat", temperature: float = 0.1):
         super().__init__()
         self.api_key = api_key; self.model = model; self.temperature = temperature; self.api_base = "https://api.deepseek.com/v1"
+
     def call(self, prompt: str, *args, **kwargs) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         payload = {"model": self.model, "messages": [{"role": "user", "content": str(prompt)}], "temperature": self.temperature, "max_tokens": 4096}
@@ -25,8 +30,10 @@ class DeepSeekLLM(LLM):
             return response.json()["choices"][0]["message"]["content"]
         except Exception as e:
             return f"API请求或网络发生错误: {e}"
+
     @property
-    def type(self) -> str: return "deepseek-llm"
+    def type(self) -> str:
+        return "deepseek-llm"
 
 # -------------------------------------------------------------------
 # 模块二: 最终版的数据回填函数（增加专家级清洗和调试）
@@ -67,7 +74,8 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
                 df[key] = df[key].fillna('N/A').astype(str).str.strip().str.lower().str.replace(r'\s+', '', regex=True)
 
     valid_sources = [df for df in cleaned_source_dfs if all(key in df.columns for key in key_columns)]
-    if not valid_sources: raise ValueError("数据源文件中缺少部分或全部关键列。")
+    if not valid_sources:
+        raise ValueError("数据源文件中缺少部分或全部关键列。")
     
     combined_sources = pd.concat(valid_sources, ignore_index=True)
     
@@ -80,7 +88,8 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
             else:
                 agg_functions[col] = 'first'  # 保留第一个非空值
     
-    if not agg_functions: return cleaned_template_df
+    if not agg_functions:
+        return cleaned_template_df
     
     # 识别并保留特殊行（如"项目"、"一"等）
     special_rows = combined_sources[
@@ -197,7 +206,109 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
     return final_df
 
 # -------------------------------------------------------------------
-# 主程序: Streamlit 界面逻辑 (简化版)
+# 新增模块: 通用统计和预测功能
+# -------------------------------------------------------------------
+# 通用数据获取函数，支持链接和文件上传
+def get_general_data(data_source, data_type, data_files=None):
+    if data_type == "金属价格":
+        if data_source:
+            try:
+                url = data_source
+                response = requests.get(url)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                high_prices = []
+                low_prices = []
+                high_price_elements = soup.find_all('span', class_='high-price')
+                low_price_elements = soup.find_all('span', class_='low-price')
+                for high, low in zip(high_price_elements, low_price_elements):
+                    high_prices.append(float(high.text.strip()))
+                    low_prices.append(float(low.text.strip()))
+                dates = pd.date_range(end=pd.Timestamp.now(), periods=len(high_prices))
+                df = pd.DataFrame({
+                    'Date': dates,
+                    'High Price': high_prices,
+                    'Low Price': low_prices
+                })
+                df['Average Price'] = (df['High Price'] + df['Low Price']) / 2
+                return df
+            except Exception as e:
+                st.error(f"从链接获取数据失败: {str(e)}")
+        elif data_files:
+            try:
+                dfs = [pd.read_excel(f) for f in data_files]
+                df = pd.concat(dfs, ignore_index=True)
+                if 'High Price' in df.columns and 'Low Price' in df.columns:
+                    df['Average Price'] = (df['High Price'] + df['Low Price']) / 2
+                    return df
+                else:
+                    st.error("上传文件缺少必要列（High Price 和 Low Price）")
+            except Exception as e:
+                st.error(f"从上传文件获取数据失败: {str(e)}")
+    # 可以添加其他数据类型的获取逻辑
+    st.error(f"暂不支持 {data_type} 数据类型的获取")
+    return pd.DataFrame()
+
+# 通用数据预测函数
+def general_predict(df, target_column):
+    model = SARIMAX(df[target_column], order=(1, 1, 1), seasonal_order=(1, 1, 1, 7))
+    model_fit = model.fit()
+    future_steps_1day = 1
+    future_steps_1month = 30
+    future_steps_1quarter = 90
+    future_steps_6months = 180
+    forecast_1day = model_fit.get_forecast(steps=future_steps_1day)
+    forecast_1month = model_fit.get_forecast(steps=future_steps_1month)
+    forecast_1quarter = model_fit.get_forecast(steps=future_steps_1quarter)
+    forecast_6months = model_fit.get_forecast(steps=future_steps_6months)
+    return forecast_1day.predicted_mean, forecast_1month.predicted_mean, forecast_1quarter.predicted_mean, forecast_6months.predicted_mean
+
+# 通用图表生成函数
+def general_plot(df, forecasts, target_column, data_type):
+    plt.figure(figsize=(15, 8))
+    plt.plot(df['Date'], df[target_column], label=f'{data_type} 历史数据')
+    future_dates = {}
+    steps = [30, 90, 180]
+    periods = ['1 Month', '1 Quarter', '6 Months']
+    for i, forecast in enumerate(forecasts[1:]):
+        future_dates[periods[i]] = pd.date_range(start=df['Date'].iloc[-1], periods=len(forecast) + 1, freq='D')[1:]
+        plt.plot(future_dates[periods[i]], forecast, label=f'{periods[i]} Forecast', linestyle='--')
+
+    changes = df[target_column].pct_change()
+    for i in range(1, len(df)):
+        if abs(changes.iloc[i]) > 0.1:
+            event = find_event(df['Date'].iloc[i], data_type)
+            plt.annotate(f'{event}',
+                         xy=(df['Date'].iloc[i], df[target_column].iloc[i]),
+                         xytext=(10, 10),
+                         textcoords='offset points',
+                         arrowprops=dict(arrowstyle='->'))
+
+    plt.title(f'{data_type} 统计和预测')
+    plt.xlabel('日期')
+    plt.ylabel('数值')
+    plt.legend()
+    plt.grid(True)
+    return plt
+
+# 查找对应事件（示例，需根据实际情况调整）
+def find_event(date, data_type):
+    return f'{data_type} 事件于 {date.strftime("%Y-%m-%d")}'
+
+# 可能的事件类型列表
+def possible_general_events(data_type):
+    if data_type == "金属价格":
+        return [
+            "全球经济形势变化",
+            "金属供需关系改变",
+            "政策法规调整",
+            "自然灾害影响生产",
+            "地缘政治冲突"
+        ]
+    # 可以添加其他数据类型的事件列表
+    return [f"{data_type} 相关的市场变化", f"{data_type} 相关的政策调整"]
+
+# -------------------------------------------------------------------
+# 主程序: Streamlit 界面逻辑 (修改版)
 # -------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="智能数据分析平台", page_icon="🧠", layout="wide")
@@ -209,27 +320,43 @@ def main():
 
     st.header("AI 智能分析")
     st.info("上传数据文件并用自然语言提问，AI会自动分析并可将结果填入指定模板。")
-    
-    # 文件上传区域
-    col1, col2 = st.columns(2)
-    with col1:
-        data_files = st.file_uploader("上传数据文件", type=["xlsx", "xls"], accept_multiple_files=True)
-    with col2:
-        template_option = st.radio("模板文件来源", 
-                                 ["上传模板文件", "指定本地文件路径"],
-                                 help="选择直接修改本地文件或上传模板文件")
-        
-        if template_option == "上传模板文件":
-            template_file = st.file_uploader("上传模板文件", type=["xlsx", "xls"])
-            local_path = None
-        else:
-            local_path = st.text_input("本地模板文件路径", 
-                                     placeholder="例如: e:/电工杯/templates/report_template.xlsx")
-            template_file = None
 
-    # 分析请求输入
-    prompt = st.text_area("分析需求", height=100, 
-                        placeholder="例如: 计算各产品的销售总额并填入模板")
+    st.header("通用统计和预测")
+    data_type = st.selectbox("选择数据类型", ["金属价格", "其他类型1", "其他类型2"])  # 可按需扩展
+    data_source = st.text_input("输入数据来源链接", "https://example.chinametal.com")
+    data_files = st.file_uploader("上传数据文件", accept_multiple_files=True)
+
+    if st.button("开始统计和预测"):
+        with st.spinner("正在获取数据和进行预测..."):
+            try:
+                df = get_general_data(data_source, data_type, data_files)
+                if df.empty:
+                    return
+                if data_type == "金属价格":
+                    target_column = "Average Price"
+                else:
+                    # 可根据不同数据类型指定目标列
+                    target_column = "Value"  
+                forecasts = general_predict(df, target_column)
+                fig = general_plot(df, forecasts, target_column, data_type)
+                st.pyplot(fig)
+                st.write(f"第二天 {target_column} 预测:", forecasts[0].iloc[0])
+                st.write(f"可能导致 {data_type} 大幅变化的事件类型:", possible_general_events(data_type))
+                st.write("预测原理：使用SARIMAX时间序列模型进行预测，结合历史数据的趋势和季节性特征。")
+            except Exception as e:
+                st.error(f"统计和预测失败: {str(e)}")
+
+    # 修复未定义变量问题
+    data_files = st.file_uploader("上传分析用数据文件", accept_multiple_files=True)
+    prompt = st.text_area("输入分析需求", "")
+    template_option = st.selectbox("选择模板处理方式", ["无模板", "上传模板文件", "指定本地文件路径"])
+    if template_option == "上传模板文件":
+        template_file = st.file_uploader("上传模板文件", type=["xlsx", "xls"])
+    elif template_option == "指定本地文件路径":
+        local_path = st.text_input("输入本地模板文件路径")
+    else:
+        template_file = None
+        local_path = None
 
     if st.button("开始分析", type="primary", use_container_width=True):
         if not api_key or not api_key.startswith("sk-"):
