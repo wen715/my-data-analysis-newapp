@@ -421,18 +421,37 @@ def main():
                         
                         # 处理本地文件路径
                         elif template_option == "指定本地文件路径" and local_path:
-                            if os.path.exists(local_path):
-                                template_df = pd.read_excel(local_path)
+                            try:
+                                # 规范化路径并检查存在性
+                                normalized_path = os.path.normpath(local_path)
+                                
+                                # 检查路径是否存在
+                                if not os.path.exists(normalized_path):
+                                    # 尝试在templates目录下查找
+                                    templates_path = os.path.join(os.path.dirname(__file__), 'templates', os.path.basename(normalized_path))
+                                    if os.path.exists(templates_path):
+                                        normalized_path = templates_path
+                                    else:
+                                        st.error(f"文件路径不存在: {normalized_path}\n请检查路径是否正确或文件是否存在\n\n提示：您也可以将模板文件放入'templates'目录下直接使用文件名")
+                                        return
+                                
+                                # 检查文件扩展名
+                                if not normalized_path.lower().endswith(('.xlsx', '.xls')):
+                                    st.error(f"仅支持Excel文件(.xlsx/.xls)，当前文件: {os.path.splitext(normalized_path)[1]}")
+                                    return
+                                
+                                template_df = pd.read_excel(normalized_path)
                                 # 直接修改本地文件
                                 result_df = fill_template_final(
                                     template_df, [result],
                                     key_columns=template_df.columns.tolist()[:1],
                                     columns_to_fill=result.columns.tolist(),
-                                    template_path=local_path,
+                                    template_path=normalized_path,
                                     inplace=True
                                 )
-                            else:
-                                st.error("指定的本地文件路径不存在，请检查路径是否正确")
+                                st.success(f"成功处理文件: {normalized_path}")
+                            except Exception as e:
+                                st.error(f"处理文件时出错: {str(e)}\n请检查文件格式是否正确或是否被其他程序占用")
                     else:
                         st.write(result)
                         
