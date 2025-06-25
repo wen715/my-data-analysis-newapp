@@ -391,18 +391,21 @@ def main():
                     if isinstance(result, pd.DataFrame):
                         st.dataframe(result)
                         
-                        # 添加反馈功能
-                        feedback = st.radio("您对结果满意吗？", ["满意", "不满意"])
+                        # 添加更明显的反馈功能
+                        st.markdown("---")
+                        st.subheader("反馈")
+                        feedback = st.radio("您对结果满意吗？", ["满意", "不满意"], horizontal=True)
                         if feedback == "不满意":
                             st.subheader("请告诉我们哪里需要改进")
                             improvement_areas = st.multiselect(
                                 "选择需要改进的方面",
-                                ["数据准确性", "分析深度", "可视化效果", "其他"]
+                                ["数据准确性", "分析深度", "可视化效果", "其他"],
+                                key="feedback_areas"
                             )
                             if "其他" in improvement_areas:
-                                custom_feedback = st.text_input("请具体说明")
+                                custom_feedback = st.text_input("请具体说明", key="custom_feedback")
                             
-                            if st.button("提交反馈并改进"):
+                            if st.button("提交反馈并改进", key="submit_feedback"):
                                 with st.spinner("根据您的反馈重新分析中..."):
                                     # 根据反馈调整查询
                                     adjusted_prompt = prompt
