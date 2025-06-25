@@ -379,6 +379,13 @@ def main():
         template_file = st.file_uploader("上传模板文件", type=["xlsx", "xls"])
     elif template_option == "指定本地文件路径":
         local_path = st.text_input("输入本地模板文件路径")
+        if local_path:
+            if not os.path.exists(local_path):
+                st.warning(f"文件路径不存在: {local_path}")
+            elif not os.path.isfile(local_path):
+                st.warning(f"路径不是文件: {local_path}")
+            elif not local_path.lower().endswith(('.xlsx', '.xls')):
+                st.warning("请选择Excel文件(.xlsx或.xls)")
     else:
         template_file = None
         local_path = None
@@ -416,6 +423,16 @@ def main():
                                 template_df, [result], 
                                 key_columns=template_df.columns.tolist()[:1],  # 使用第一列作为关键列
                                 columns_to_fill=result.columns.tolist()
+                            )
+                        elif template_option == "指定本地文件路径" and local_path and os.path.exists(local_path) and os.path.isfile(local_path):
+                            template_df = pd.read_excel(local_path)
+                            # 使用fill_template_final函数处理
+                            result_df = fill_template_final(
+                                template_df, [result], 
+                                key_columns=template_df.columns.tolist()[:1],  # 使用第一列作为关键列
+                                columns_to_fill=result.columns.tolist(),
+                                template_path=local_path,
+                                inplace=True
                             )
                             
                             # 提供下载或直接保存到指定路径
