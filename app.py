@@ -75,18 +75,32 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
 
     valid_sources = [df for df in cleaned_source_dfs if all(key in df.columns for key in key_columns)]
     if not valid_sources:
-        st.error("数据源文件中缺少部分或全部关键列。请检查以下列是否存在: " + str(key_columns))
-        st.write("数据源文件中的列名:", [df.columns.tolist() for df in cleaned_source_dfs])
         raise ValueError("数据源文件中缺少部分或全部关键列。")
     
     combined_sources = pd.concat(valid_sources, ignore_index=True)
     
-    # 改进聚合逻辑 - 保留文本列
+    # 改进聚合逻辑 - 处理工作簿6和工作簿2的特殊情况
     agg_functions = {}
     for col in columns_to_fill:
         if col in combined_sources.columns:
             if pd.api.types.is_numeric_dtype(combined_sources[col]):
-                agg_functions[col] = 'sum'
+                if len(source_dfs) == 2:  # 当有两个数据源时（工作簿6和工作簿2）
+                    # 检查工作簿6和工作簿2的数据情况
+                    df6_has_data = not source_dfs[0][col].isna().all()
+                    df2_has_data = not source_dfs[1][col].isna().all()
+                    
+                    if df6_has_data and not df2_has_data:
+                        # 工作簿6有数据而工作簿2没有数据，直接使用工作簿6的数据
+                        agg_functions[col] = ('first', lambda x: x.iloc[0])
+                    elif df6_has_data and df2_has_data:
+                        # 两者都有数据，将两列数据相加
+                        agg_functions[col] = ('sum', lambda x: x.sum())
+                    else:
+                        # 其他情况使用默认的sum
+                        agg_functions[col] = 'sum'
+                else:
+                    # 默认情况使用sum
+                    agg_functions[col] = 'sum'
             else:
                 agg_functions[col] = 'first'  # 保留第一个非空值
     
@@ -160,18 +174,12 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
     for col in columns_to_fill:
         source_col_name = f"{col}_source"
         if source_col_name in merged_df.columns:
-            # 改进的空白替换逻辑 - 增加调试信息
-            st.write(f"**正在处理列: {col}**")
-            st.write(f"模板值样本:", merged_df[col].head().to_list())
-            st.write(f"源值样本:", merged_df[source_col_name].head().to_list())
-            
+            # 改进的空白替换逻辑 - 放宽条件
             # 只要源数据有值且模板值为空/0/None/空字符串，就进行替换
             if pd.api.types.is_numeric_dtype(merged_df[col].dtype):
                 mask_to_fill = (merged_df[col].isna()) | (merged_df[col] == 0) | (merged_df[col].astype(str) == "None") | (merged_df[col].astype(str) == "nan")
             else:
                 mask_to_fill = (merged_df[col].isna()) | (merged_df[col] == "") | (merged_df[col].astype(str) == "None") | (merged_df[col].astype(str) == "nan")
-            
-            st.write(f"将替换 {mask_to_fill.sum()} 条记录")
             
             # 确保源数据有值时才替换
             mask_to_fill = mask_to_fill & (~merged_df[source_col_name].isna())
@@ -390,38 +398,6 @@ def main():
                     st.subheader("分析结果")
                     if isinstance(result, pd.DataFrame):
                         st.dataframe(result)
-                        
-                        # 添加更明显的反馈功能
-                        st.markdown("---")
-                        st.subheader("反馈")
-                        feedback = st.radio("您对结果满意吗？", ["满意", "不满意"], horizontal=True)
-                        if feedback == "不满意":
-                            st.subheader("请告诉我们哪里需要改进")
-                            improvement_areas = st.multiselect(
-                                "选择需要改进的方面",
-                                ["数据准确性", "分析深度", "可视化效果", "其他"],
-                                key="feedback_areas"
-                            )
-                            if "其他" in improvement_areas:
-                                custom_feedback = st.text_input("请具体说明", key="custom_feedback")
-                            
-                            if st.button("提交反馈并改进", key="submit_feedback"):
-                                with st.spinner("根据您的反馈重新分析中..."):
-                                    # 根据反馈调整查询
-                                    adjusted_prompt = prompt
-                                    if "数据准确性" in improvement_areas:
-                                        adjusted_prompt += " 请确保数据准确性，重新检查数据源。"
-                                    if "分析深度" in improvement_areas:
-                                        adjusted_prompt += " 请提供更深入的分析和见解。"
-                                    if "可视化效果" in improvement_areas:
-                                        adjusted_prompt += " 请改进可视化效果，使数据更直观。"
-                                    if "其他" in improvement_areas and custom_feedback:
-                                        adjusted_prompt += " " + custom_feedback
-                                    
-                                    # 重新执行分析
-                                    result = lake.chat(adjusted_prompt)
-                                    st.success("已根据您的反馈重新生成结果！")
-                                    st.dataframe(result)
                         
                         # 处理模板文件
                         if template_option == "上传模板文件" and template_file:
