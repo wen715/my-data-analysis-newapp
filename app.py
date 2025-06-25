@@ -201,6 +201,15 @@ def fill_template_final(template_df: pd.DataFrame, source_dfs: list, key_columns
         try:
             # 获取原始文件路径
             original_path = os.path.abspath(template_path)
+            
+            # 检查模板文件是否存在
+            if not os.path.exists(original_path):
+                st.error(f"找不到模板文件: {original_path}")
+                st.info("请检查文件路径是否正确")
+                st.info("确保文件存在且具有读取权限")
+                st.info("或者重新上传模板文件")
+                return final_df
+                
             # 创建临时副本(使用.xlsx扩展名)
             temp_path = os.path.splitext(original_path)[0] + "_temp.xlsx"
             
