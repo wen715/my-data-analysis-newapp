@@ -409,15 +409,42 @@ def main():
                                 columns_to_fill=result.columns.tolist()
                             )
                             
-                            # 提供下载
-                            output = io.BytesIO()
-                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                result_df.to_excel(writer, index=False)
-                            st.download_button(
-                                "下载填入模板的结果", 
-                                output.getvalue(), 
-                                "analysis_result_in_template.xlsx"
-                            )
+                            # 提供下载或直接保存到指定路径
+                            if local_path:
+                                try:
+                                    # 检查路径是否存在并具有写入权限
+                                    dir_path = os.path.dirname(local_path)
+                                    if not os.path.exists(dir_path):
+                                        os.makedirs(dir_path)
+                                    
+                                    # 创建备份文件
+                                    backup_path = f"{local_path}.bak"
+                                    if os.path.exists(local_path):
+                                        os.rename(local_path, backup_path)
+                                    
+                                    # 写入结果到指定路径
+                                    with pd.ExcelWriter(local_path, engine='openpyxl') as writer:
+                                        result_df.to_excel(writer, index=False)
+                                    st.success(f"结果已成功保存到: {local_path}")
+                                    
+                                    # 保留备份文件3秒后删除
+                                    time.sleep(3)
+                                    if os.path.exists(backup_path):
+                                        os.remove(backup_path)
+                                except Exception as e:
+                                    st.error(f"保存到指定路径失败: {str(e)}")
+                                    if os.path.exists(backup_path) and not os.path.exists(local_path):
+                                        os.rename(backup_path, local_path)
+                            else:
+                                # 提供下载
+                                output = io.BytesIO()
+                                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                    result_df.to_excel(writer, index=False)
+                                st.download_button(
+                                    "下载填入模板的结果", 
+                                    output.getvalue(), 
+                                    "analysis_result_in_template.xlsx"
+                                )
                         
                         # 处理本地文件路径
                         elif template_option == "指定本地文件路径" and local_path:
@@ -432,7 +459,8 @@ def main():
                                     if os.path.exists(templates_path):
                                         normalized_path = templates_path
                                     else:
-                                        st.error(f"文件路径不存在: {normalized_path}\n请检查路径是否正确或文件是否存在\n\n提示：您也可以将模板文件放入'templates'目录下直接使用文件名")
+                                        # 更友好的错误提示，包含可能的解决方案
+                                        st.error(f"找不到模板文件: {normalized_path}\n\n解决方案:\n1. 请检查文件路径是否正确\n2. 确保文件已放入'templates'目录\n3. 或者重新上传模板文件")
                                         return
                                 
                                 # 检查文件扩展名
